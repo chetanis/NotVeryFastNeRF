@@ -20,16 +20,18 @@ from losses import loss_dict
 from metrics import *
 
 # pytorch-lightning
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning import LightningModule, Trainer
-from pytorch_lightning.logging import TestTubeLogger
+from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning import LightningModule, Trainer
+from lightning.pytorch.loggers import TensorBoardLogger
 
 class NeRFSystem(LightningModule):
     def __init__(self, hparams):
         super(NeRFSystem, self).__init__()
-        self.hparams = hparams
+        self.save_hyperparameters(hparams)
 
         self.loss = loss_dict[hparams.loss_type]()
+
+        self.validation_steps_outputs = []
 
         self.embedding_xyz = Embedding(3, 10) # 10 is the default number
         self.embedding_dir = Embedding(3, 4) # 4 is the default number
@@ -135,46 +137,65 @@ class NeRFSystem(LightningModule):
                                                stack, self.global_step)
 
         log['val_psnr'] = psnr(results[f'rgb_{typ}'], rgbs)
+        self.validation_steps_outputs.append(log)
         return log
 
-    def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self):
+        # 1. Stack the metrics from all batches in the epoch
+        outputs = self.validation_steps_outputs
+        
         mean_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
         mean_psnr = torch.stack([x['val_psnr'] for x in outputs]).mean()
 
-        return {'progress_bar': {'val_loss': mean_loss,
-                                 'val_psnr': mean_psnr},
-                'log': {'val/loss': mean_loss,
-                        'val/psnr': mean_psnr}
-               }
+        # 2. Use self.log() to record the metrics
+        # The new API automatically handles progress bar and standard logging via this method.
+        # 'prog_bar=True' adds it to the progress bar display.
+        self.log('val/loss', mean_loss, prog_bar=True)
+        self.log('val/psnr', mean_psnr, prog_bar=True)
+
+        # 3. Clear the storage list for the next epoch
+        self.validation_steps_outputs.clear() 
 
 
 if __name__ == '__main__':
     hparams = get_opts()
     system = NeRFSystem(hparams)
-    checkpoint_callback = ModelCheckpoint(filepath=os.path.join(f'ckpts/{hparams.exp_name}',
-                                                                '{epoch:d}'),
+    ckpt_dir = os.path.join('ckpts', hparams.exp_name)
+    os.makedirs(ckpt_dir, exist_ok=True)
+    checkpoint_callback = ModelCheckpoint(dirpath=ckpt_dir,
+                                          filename='{epoch:d}',
                                           monitor='val/loss',
                                           mode='min',
-                                          save_top_k=5,)
+                                          save_top_k=5)
 
-    logger = TestTubeLogger(
+    logger = TensorBoardLogger(
         save_dir="logs",
         name=hparams.exp_name,
-        debug=False,
-        create_git_tag=False
     )
 
-    trainer = Trainer(max_epochs=hparams.num_epochs,
-                      checkpoint_callback=checkpoint_callback,
-                      resume_from_checkpoint=hparams.ckpt_path,
-                      logger=logger,
-                      early_stop_callback=None,
-                      weights_summary=None,
-                      progress_bar_refresh_rate=1,
-                      gpus=hparams.num_gpus,
-                      distributed_backend='ddp' if hparams.num_gpus>1 else None,
-                      num_sanity_val_steps=1,
-                      benchmark=True,
-                      profiler=hparams.num_gpus==1)
+    if hparams.num_gpus > 1:
+        training_strategy = 'ddp'
+    elif hparams.num_gpus == 1:
+        training_strategy = 'auto' # Let lightning choose the best single-device strategy
+    else:
+        training_strategy = 'auto' # CPU or other fallback
 
-    trainer.fit(system)
+    trainer = Trainer(
+        max_epochs=hparams.num_epochs,
+        callbacks=[checkpoint_callback],
+        logger=logger,
+        
+        # --- Updated Arguments for modern Lightning ---
+        accelerator='gpu' if hparams.num_gpus > 0 else 'cpu', # Use GPU accelerator if available
+        devices=hparams.num_gpus if hparams.num_gpus > 0 else 1, # Set number of devices
+        strategy=training_strategy,                              # Set distributed strategy (ddp, etc.)
+        
+        enable_progress_bar=True, # Changed from integer 1 to boolean True
+        
+        # --- Remaining Arguments ---
+        num_sanity_val_steps=1,
+        benchmark=True,
+        profiler='simple' if hparams.num_gpus==1 else None # Modern profiler argument takes a string
+    )
+
+    trainer.fit(system,ckpt_path=hparams.ckpt_path)
