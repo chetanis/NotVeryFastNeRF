@@ -2,6 +2,8 @@ import os, sys
 from opt import get_opts
 import torch
 from collections import defaultdict
+import csv
+from datetime import datetime
 
 from torch.utils.data import DataLoader
 from datasets import dataset_dict
@@ -32,6 +34,16 @@ class NeRFSystem(LightningModule):
         self.loss = loss_dict[hparams.loss_type]()
 
         self.validation_steps_outputs = []
+        
+        # Create CSV file for logging training losses
+        self.loss_log_dir = os.path.join('logs', hparams.exp_name)
+        os.makedirs(self.loss_log_dir, exist_ok=True)
+        self.loss_log_file = os.path.join(self.loss_log_dir, 'training_losses.csv')
+        
+        # Initialize CSV file with headers
+        with open(self.loss_log_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['epoch', 'global_step', 'train_loss', 'train_psnr', 'learning_rate', 'timestamp'])
 
         self.embedding_xyz = Embedding(3, 10) # 10 is the default number
         self.embedding_dir = Embedding(3, 4) # 4 is the default number
@@ -112,6 +124,18 @@ class NeRFSystem(LightningModule):
         with torch.no_grad():
             psnr_ = psnr(results[f'rgb_{typ}'], rgbs)
             log['train/psnr'] = psnr_
+        
+        # Save training loss to CSV file
+        with open(self.loss_log_file, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                self.current_epoch,
+                self.global_step,
+                loss.item(),
+                psnr_.item(),
+                log['lr'],
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            ])
 
         return {'loss': loss,
                 'progress_bar': {'train_psnr': psnr_},

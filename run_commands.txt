@@ -1,0 +1,4 @@
+python train.py --dataset_name llff --root_dir ..\data\myData\chjra --N_importance 64 --img_wh 500 375 --num_epochs 10 --batch_size 1024 --optimizer adam --lr 5e-4 --lr_scheduler steplr --decay_step 2 4 8 --decay_gamma 0.5 --exp_name chjra
+
+python eval.py --dataset_name llff --root_dir ..\data\myData\chjra --scene_name chjra --split test --img_wh 375 500 --N_importance 64 --ckpt_path ckpts\chjra\epoch=8.ckpt
+
